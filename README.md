@@ -76,3 +76,7 @@ claude plugin install edgerunners --marketplace Alexanderadon/edgerunners
 - `tools/build-hero.ps1 <герой>` — собрать кадры героя из исходников и листов (`art/<герой>/sheets.json`), см. `art/README.md`.
 - `tools/pet-restart.ps1 -Demo <клип>` — перезапустить питомца и показать клип.
 - Тесты: `claude plugin test .`, проверка: `claude plugin validate .`
+
+## Лицензия
+
+Автор: Alexanderadon (Alexander). Мод бесплатный, распространяется по лицензии MIT, см. [LICENSE](LICENSE): можно пользоваться, менять и делиться, сохраняя указание автора.
