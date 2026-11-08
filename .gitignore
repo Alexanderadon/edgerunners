@@ -1,0 +1,13 @@
+assets/pet/state.json
+preview/
+# ����� ���� ������ ��� ����: � ����� ��� �� ��������.
+assets/sounds/call.mp3
+assets/pet/snap.request
+assets/sounds/call.m4a
+assets/popup/snooze
+assets/pet/poke.request
+assets/pet/settings.json
+assets/pet/record.request
+# Исходники артов и рабочие заметки — не в репозитории.
+art/
+docs/

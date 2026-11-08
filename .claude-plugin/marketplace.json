@@ -1,0 +1,14 @@
+{
+  "name": "edgerunners",
+  "owner": {
+    "name": "Alexanderadon"
+  },
+  "description": "Неофициальный фан-мод: аниме-напарники для Claude Code",
+  "plugins": [
+    {
+      "name": "edgerunners",
+      "source": "./",
+      "description": "Неофициальный фан-мод. Живые аниме-напарники для Claude Code: Роман, Талия, Ди и Уик на рабочем столе, анимации и эффекты, реплики о том, что делает Claude, входящий вызов, /persona и /report"
+    }
+  ]
+}
