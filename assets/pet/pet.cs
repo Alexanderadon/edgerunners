@@ -220,10 +220,10 @@ public class PetForm : Form
     }
 
     // ---- обновления и звезда на GitHub ----
-    // Раз в 6 часов сверяем version из .claude-plugin/plugin.json с репозиторием. Новая версия: «АВТО» — питомец сам
-    // запускает claude plugin update, «СПРАШИВАТЬ» — говорит об этом, клик по герою обновляет. Через пару дней после
-    // первого запуска один раз просит звезду на GitHub (клик открывает страницу). Пока висит такая карточка, реплики
-    // мода ждут, а клик по герою — ответ на неё.
+    // Раз в час сверяем version из .claude-plugin/plugin.json с репозиторием. Новая версия: «АВТО» — питомец сам
+    // запускает claude plugin update, «СПРАШИВАТЬ» — говорит об этом, клик по герою обновляет. В первый день один раз
+    // просит звезду на GitHub: только по клику ставит её через GitHub CLI (gh) с аккаунта человека, а без gh или без
+    // входа в него открывает страницу. Пока висит такая карточка, реплики мода ждут, а клик по герою — ответ на неё.
     const string REPO = "https://github.com/Alexanderadon/edgerunners";
     const string REMOTE_MANIFEST = "https://raw.githubusercontent.com/Alexanderadon/edgerunners/main/.claude-plugin/plugin.json";
     bool autoUpdate, starAsked, updating, downloaded, updatedOk;
@@ -232,6 +232,9 @@ public class PetForm : Form
     volatile string remoteVer;
     volatile bool checkNow, checkReport;
     volatile int updateDone;
+    // Итог звезды через gh (1 поставлена, -1 нет gh или входа), пока ждём — starring.
+    volatile int starDone;
+    bool starring;
     DateTime petStart = DateTime.Now, nextNotice = DateTime.MaxValue, noticeUntil = DateTime.MinValue;
     Action noticeAct;
 
@@ -262,7 +265,7 @@ public class PetForm : Form
                 }
             }
             catch (Exception e) { remoteVer = ""; Report("update check: " + e.Message); }
-            for (int i = 0; i < 6 * 360 && !closing && !checkNow; i++) Thread.Sleep(10000);
+            for (int i = 0; i < 360 && !closing && !checkNow; i++) Thread.Sleep(10000);
             checkNow = false;
         }
     }
@@ -292,6 +295,18 @@ public class PetForm : Form
     void UpdateTick()
     {
         var t = DateTime.Now;
+        int star = starDone;
+        if (star != 0)
+        {
+            starDone = 0;
+            starring = false;
+            if (star > 0) Notify(Tr("Звезда стоит, спасибо! Это топливо для новых героев", "Star is in, thanks! It fuels new heroes"), null);
+            else
+            {
+                OpenRepo();
+                Notify(Tr("Открыл GitHub: звезда справа вверху. Спасибо!", "Opened GitHub: the Star button is at the top right. Thanks!"), null);
+            }
+        }
         int done = updateDone;
         if (done != 0)
         {
@@ -300,8 +315,8 @@ public class PetForm : Form
             updatedOk = done > 0;
             nextNotice = DateTime.MaxValue;
             if (done > 0)
-                Notify(Tr("Обновился до v" + handledVer + ", перезапусти Claude Code. Кликни меня, открою GitHub для звезды",
-                          "Updated to v" + handledVer + ", restart Claude Code. Click me to open GitHub and leave a star"), OpenRepo);
+                Notify(Tr("Обновился до v" + handledVer + ", перезапусти Claude Code. Кликни, поставлю звезду на GitHub",
+                          "Updated to v" + handledVer + ", restart Claude Code. Click me to star the mod on GitHub"), StarRepo);
             else
                 Notify(Tr("Не вышло обновиться. Набери /plugin → Marketplaces → edgerunners → Update",
                           "Update failed. Run /plugin → Marketplaces → edgerunners → Update"), null);
@@ -340,15 +355,13 @@ public class PetForm : Form
                 Notify(Tr("Вышла новая версия мода: v" + handledVer + ". Кликни меня, обновлю", "Mod update v" + handledVer + " is out. Click me and I'll install it"), StartUpdate);
             }
         }
-        // Звезда: один раз, через пару дней после первого запуска и не поверх обновления.
-        DateTime first;
-        if (!starAsked && !updating && nextNotice == DateTime.MaxValue && !menuOpen && t >= noticeUntil && t > petStart.AddSeconds(90)
-            && DateTime.TryParseExact(firstRun, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out first) && (t - first).TotalDays >= 2)
+        // Звезда: один раз, в первый же день, когда герой минут десять поработал рядом, и не поверх обновления.
+        if (!starAsked && !updating && nextNotice == DateTime.MaxValue && !menuOpen && t >= noticeUntil && t > petStart.AddMinutes(10))
         {
             starAsked = true;
             SaveSettings();
-            Notify(Tr("Нравится, как мы работаем? Кликни меня, открою GitHub. Звезда моду очень поможет",
-                      "Enjoying our work together? Click me to open GitHub, a star really helps the mod"), OpenRepo);
+            Notify(Tr("Нравится, как мы работаем? Кликни меня, поставлю моду звезду на GitHub",
+                      "Enjoying our work together? Click me and I'll star the mod on GitHub"), StarRepo);
         }
     }
 
@@ -428,8 +441,53 @@ public class PetForm : Form
     {
         try { Process.Start(new ProcessStartInfo(REPO) { UseShellExecute = true }); }
         catch (Exception e) { Report("repo: " + e.Message); }
+    }
+
+    // Человек сам нажал «звезда»: ставим её через GitHub CLI с его аккаунта; нет gh или входа — откроем страницу.
+    void StarRepo()
+    {
         if (!starAsked) { starAsked = true; SaveSettings(); }
-        Notify(Tr("Спасибо! Звёзды дают топливо для новых героев", "Thanks! Stars fuel new heroes"), null);
+        if (starring) return;
+        starring = true;
+        Notify(Tr("Ставлю звезду…", "Starring…"), null);
+        new Thread(() => { starDone = GhStar() ? 1 : -1; }) { IsBackground = true, Name = "pet-star" }.Start();
+    }
+
+    static bool GhStar()
+    {
+        string gh = FindGh();
+        if (gh == null) return false;
+        try
+        {
+            var psi = new ProcessStartInfo(gh, "api --method PUT user/starred/Alexanderadon/edgerunners")
+            { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+            psi.EnvironmentVariables["GH_PROMPT_DISABLED"] = "1";
+            using (var p = Process.Start(psi))
+            {
+                p.BeginOutputReadLine();
+                p.BeginErrorReadLine();
+                if (!p.WaitForExit(20000)) { try { p.Kill(); } catch (Exception) { } return false; }
+                return p.ExitCode == 0;
+            }
+        }
+        catch (Exception) { return false; }
+    }
+
+    // gh.exe из PATH или из обычных мест установки.
+    static string FindGh()
+    {
+        foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';'))
+            try
+            {
+                string d = dir.Trim().Trim('"');
+                if (d.Length > 0 && File.Exists(Path.Combine(d, "gh.exe"))) return Path.Combine(d, "gh.exe");
+            }
+            catch (Exception) { }
+        foreach (var f in new[] {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"GitHub CLI\gh.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Programs\GitHub CLI\gh.exe") })
+            if (File.Exists(f)) return f;
+        return null;
     }
 
     void CheckNow()
@@ -4463,7 +4521,7 @@ public class PetForm : Form
         SetChoices(cx, y, right, new[] { Tr("СПРАШИВАТЬ", "ASK"), Tr("АВТО", "AUTO") }, autoUpdate ? 1 : 0, false, i => { autoUpdate = i == 1; });
         y += SET_ROW;
         SetRow(lx, y, right, "GITHUB", false);
-        SetChoices(cx, y, right, new[] { Tr("ЗВЕЗДА", "STAR"), Tr("ПРОВЕРИТЬ", "CHECK") }, -1, false, i => { if (i == 0) OpenRepo(); else CheckNow(); });
+        SetChoices(cx, y, right, new[] { Tr("ЗВЕЗДА", "STAR"), Tr("ПРОВЕРИТЬ", "CHECK") }, -1, false, i => { if (i == 0) StarRepo(); else CheckNow(); });
     }
 
     void SetRow(float lx, float y, float right, string label, bool dim)
