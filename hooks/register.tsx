@@ -322,6 +322,15 @@ const tellPet = ($: EngineInterface) => {
 // Повторный запуск сразу за первым (старт сессии и тут же /persona) только плодит процессы.
 const LAUNCH_GAP = 20_000
 let launchedAt = -LAUNCH_GAP
+
+// Окно консоли не должно мелькать ни на секунду (на Windows 11 консоль ещё и открывается в Windows Terminal, где
+// -WindowStyle Hidden не помогает). conhost.exe сам окна не создаёт, а с --headless консоль PowerShell внутри
+// него создаётся сразу невидимой. Код выхода дочерней программы conhost не возвращает (всегда 0).
+const hidden = (argv: readonly string[]): string[] => ['conhost.exe', '--headless', ...argv]
+
+// Аргумент для Start-Process -ArgumentList: он склеивает аргументы пробелами, так что путь с пробелом берём в кавычки.
+const psArg = (a: string) => `'${/\s/.test(a) ? `"${a}"` : a}'`
+
 const launchPet = async ($: EngineInterface) => {
   const now = await $.clock.now()
   if (now - launchedAt < LAUNCH_GAP) {
@@ -329,11 +338,15 @@ const launchPet = async ($: EngineInterface) => {
   }
   launchedAt = now
   const root = $.plugin.root.replace(/\//g, '\\').replace(/'/g, "''")
-  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', `${root}\\assets\\pet\\pet.ps1`, '-Root', root]
-  await $.process.run([
+  const args = [
+    '--headless', 'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+    '-File', `${root}\\assets\\pet\\pet.ps1`, '-Root', root,
+  ]
+  // Питомец живёт дольше этого вызова, поэтому стартует отдельным процессом (Start-Process), тоже без окна.
+  await $.process.run(hidden([
     'powershell', '-NoProfile', '-WindowStyle', 'Hidden', '-Command',
-    `Start-Process powershell -WindowStyle Hidden -ArgumentList ${args.map(a => `'${a}'`).join(',')}`,
-  ], { timeoutMs: 30_000 }).catch(() => undefined)
+    `Start-Process conhost.exe -WindowStyle Hidden -ArgumentList ${args.map(psArg).join(',')}`,
+  ]), { timeoutMs: 30_000 }).catch(() => undefined)
 }
 
 // Отдыхал — сперва потянется.
@@ -630,11 +643,11 @@ const callYou = async ($: EngineInterface, text: string) => {
     return
   }
   const root = $.plugin.root
-  const call = $.process.run([
+  const call = $.process.run(hidden([
     'powershell', '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
     '-File', `${root}/assets/popup/call.ps1`, '-Caller', named.name, '-Text', text,
     '-Portrait', `${root}/assets/pet/${who.sprite}/idle_01.png`, '-Seconds', '15',
-  ], { timeoutMs: 120_000 })
+  ]), { timeoutMs: 120_000 })
   void call.then(({ exitCode }) => (exitCode === 0 ? undefined : notify()), notify)
 }
 

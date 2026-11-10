@@ -190,6 +190,8 @@ public class PetForm : Form
             autoUpdate = Str(o, "updates") == "auto";
             starAsked = Flag(o, "starAsked", false);
             firstRun = Str(o, "firstRun") ?? "";
+            long un;
+            if (long.TryParse(Str(o, "updNotice") ?? "", out un)) updNoticeTicks = un;
         }
         catch (Exception) { }
     }
@@ -200,7 +202,7 @@ public class PetForm : Form
     {
         string text = "{\"lang\":\"" + lang + "\",\"call\":" + (callOn ? "true" : "false") + ",\"volume\":" + volume + ",\"lines\":" + linesMode
             + ",\"effects\":" + (fxOn ? "true" : "false") + ",\"wander\":" + (wanderOn ? "true" : "false") + ",\"size\":" + sizePct
-            + ",\"updates\":\"" + (autoUpdate ? "auto" : "ask") + "\",\"starAsked\":" + (starAsked ? "true" : "false") + ",\"firstRun\":\"" + firstRun + "\"}";
+            + ",\"updates\":\"" + (autoUpdate ? "auto" : "ask") + "\",\"starAsked\":" + (starAsked ? "true" : "false") + ",\"firstRun\":\"" + firstRun + "\",\"updNotice\":\"" + updNoticeTicks + "\"}";
         try { File.WriteAllText(settingsPath, text, new UTF8Encoding(false)); }
         catch (Exception e) { Report("settings: " + e.Message); }
     }
@@ -232,9 +234,11 @@ public class PetForm : Form
     volatile string remoteVer;
     volatile bool checkNow, checkReport;
     volatile int updateDone;
-    // Итог звезды через gh (1 поставлена, -1 нет gh или входа), пока ждём — starring.
+    // Итог звезды через gh: 1 поставлена, -1 нет gh или входа; starring, пока ждём ответа.
     volatile int starDone;
     bool starring;
+    // Когда последний раз говорили об обновлении (или обновились): о новой версии не чаще раза в сутки.
+    long updNoticeTicks;
     DateTime petStart = DateTime.Now, nextNotice = DateTime.MaxValue, noticeUntil = DateTime.MinValue;
     Action noticeAct;
 
@@ -314,6 +318,7 @@ public class PetForm : Form
             updating = false;
             updatedOk = done > 0;
             nextNotice = DateTime.MaxValue;
+            if (done > 0) { updNoticeTicks = t.Ticks; SaveSettings(); }
             if (done > 0)
                 Notify(Tr("Обновился до v" + handledVer + ", перезапусти Claude Code. Кликни, поставлю звезду на GitHub",
                           "Updated to v" + handledVer + ", restart Claude Code. Click me to star the mod on GitHub"), StarRepo);
@@ -334,16 +339,26 @@ public class PetForm : Form
                 if (rv != handledVer)
                 {
                     handledVer = rv;
+                    bool manual = checkReport;
                     checkReport = false;
                     downloaded = AlreadyDownloaded(rv);
                     if (!downloaded && autoUpdate) StartUpdate();
-                    else nextNotice = checkNow || t > petStart.AddSeconds(40) ? t : petStart.AddSeconds(40);
+                    else
+                    {
+                        // Две версии за день не превращаются в две тревоги подряд: следующая карточка не раньше чем
+                        // через сутки после прошлой. Проверка по кнопке отвечает сразу, кнопка в меню видна всегда.
+                        var at = checkNow || t > petStart.AddSeconds(40) ? t : petStart.AddSeconds(40);
+                        var calm = new DateTime(updNoticeTicks).AddHours(24);
+                        nextNotice = !manual && calm > at ? calm : at;
+                    }
                 }
             }
             else if (checkReport) { checkReport = false; Notify(Tr("У тебя последняя версия: v" + localVer, "You have the latest version: v" + localVer), null); }
         }
         if (t >= nextNotice && !menuOpen && t >= noticeUntil)
         {
+            updNoticeTicks = t.Ticks;
+            SaveSettings();
             if (downloaded)
             {
                 nextNotice = DateTime.MaxValue;
@@ -351,7 +366,7 @@ public class PetForm : Form
             }
             else
             {
-                nextNotice = t.AddHours(3);
+                nextNotice = t.AddHours(24);
                 Notify(Tr("Вышла новая версия мода: v" + handledVer + ". Кликни меня, обновлю", "Mod update v" + handledVer + " is out. Click me and I'll install it"), StartUpdate);
             }
         }
@@ -443,7 +458,7 @@ public class PetForm : Form
         catch (Exception e) { Report("repo: " + e.Message); }
     }
 
-    // Человек сам нажал «звезда»: ставим её через GitHub CLI с его аккаунта; нет gh или входа — откроем страницу.
+    // Человек сам нажал «звезда»: ставим её через GitHub CLI с его аккаунта; без gh или без входа откроем страницу.
     void StarRepo()
     {
         if (!starAsked) { starAsked = true; SaveSettings(); }
