@@ -226,7 +226,7 @@ public class PetForm : Form
     // мода ждут, а клик по герою — ответ на неё.
     const string REPO = "https://github.com/Alexanderadon/edgerunners";
     const string REMOTE_MANIFEST = "https://raw.githubusercontent.com/Alexanderadon/edgerunners/main/.claude-plugin/plugin.json";
-    bool autoUpdate, starAsked, updating, downloaded;
+    bool autoUpdate, starAsked, updating, downloaded, updatedOk;
     string firstRun = "", localVer = "", handledVer = "";
     // Версия на GitHub (пишет фоновый поток; "" — не достучались), проверка по кнопке, итог обновления (1 / -1).
     volatile string remoteVer;
@@ -297,6 +297,7 @@ public class PetForm : Form
         {
             updateDone = 0;
             updating = false;
+            updatedOk = done > 0;
             nextNotice = DateTime.MaxValue;
             if (done > 0)
                 Notify(Tr("Обновился до v" + handledVer + ", перезапусти Claude Code. Кликни меня — открою GitHub для звезды",
@@ -798,6 +799,8 @@ public class PetForm : Form
         // Кадры героя (бюст для карточки — из его idle_01, грузится в фоне при открытии меню).
         public FrameSet Set;
         public bool SetTried;
+        // Закрытый слот в меню: герой придёт с обновлением.
+        public bool Locked;
         public Hero Copy() { return new Hero { Id = Id, Sprite = Sprite, Folder = Folder, Name = Name, Role = Role, About = About, Labels = Labels, Values = Values }; }
     }
     readonly List<Hero> roster = new List<Hero>();
@@ -1748,6 +1751,8 @@ public class PetForm : Form
                 int n;
                 OpenMenu(int.TryParse(txt, out n) && n >= 0 ? n : -1);
                 if (txt == "s") ShowSettings(true);
+                // «p2» — сразу вторая страница героев.
+                if (txt.StartsWith("p") && int.TryParse(txt.Substring(1), out n) && n >= 1) FlipPage(n - 1 - menuPage);
             }
             if (File.Exists(pickRequest))
             {
@@ -3933,6 +3938,11 @@ public class PetForm : Form
     bool menuOpen, menuSettings;
     DateTime menuAt, menuTouch, menuClosedAt = DateTime.MinValue;
     RectangleF gearRect;
+    // Страницы по PER_PAGE героев, не меньше MIN_PAGES: свободные места — закрытые слоты «скоро».
+    const int PER_PAGE = 4, MIN_PAGES = 3;
+    int menuPage, menuReal;
+    DateTime pageAt;
+    RectangleF prevRect, nextRect, updRect;
     readonly List<KeyValuePair<RectangleF, Action>> setHits = new List<KeyValuePair<RectangleF, Action>>();
     List<Hero> menuHeroes = new List<Hero>();
     int menuLeft, cw = W, debugHover = -1;
@@ -3957,10 +3967,18 @@ public class PetForm : Form
             menuHeroes.Add(new Hero { Id = HeroKey, Sprite = HeroKey, Folder = dir, Name = string.IsNullOrEmpty(HeroName) ? Path.GetFileName(dir) : HeroName, Role = HeroRole, About = "" });
         // Кадры героев из меню — заранее, в фоне: выбор сработает мгновенно.
         foreach (var h in menuHeroes) Prepare(h);
+        menuReal = menuHeroes.Count;
+        int pages = Math.Max(MIN_PAGES, (menuReal + PER_PAGE - 1) / PER_PAGE);
+        while (menuHeroes.Count < pages * PER_PAGE)
+            menuHeroes.Add(new Hero { Id = "", Name = "???", Role = Tr("СКОРО", "SOON"), About = Tr("Новый напарник придёт с обновлением мода", "A new partner arrives with a mod update"), Locked = true, SetTried = true });
+        // Открываемся на странице активного героя.
+        menuPage = 0;
+        for (int i = 0; i < menuReal; i++) if (IsActive(menuHeroes[i])) menuPage = i / PER_PAGE;
         debugHover = hover;
         LayoutMenu();
         menuOpen = true;
         menuAt = DateTime.Now;
+        pageAt = menuAt;
         menuTouch = menuAt;
         menuClosedAt = DateTime.MinValue;
         wanderTarget = double.NaN;
@@ -3993,7 +4011,7 @@ public class PetForm : Form
     {
         menuHeroes = new List<Hero>();
         menuSettings = false;
-        gearRect = RectangleF.Empty;
+        gearRect = prevRect = nextRect = updRect = RectangleF.Empty;
         setHits.Clear();
         cardRects = new RectangleF[0];
         hoverK = new float[0];
@@ -4009,7 +4027,7 @@ public class PetForm : Form
     // Панель над героем: по центру на нём, но в пределах окна Claude и экрана; окно — место героя плюс панель.
     void LayoutMenu()
     {
-        int n = menuHeroes.Count, hx = (int)Math.Round(x);
+        int n = Math.Max(1, Math.Min(PER_PAGE, menuHeroes.Count - menuPage * PER_PAGE)), hx = (int)Math.Round(x);
         var scr = Screen.FromPoint(new Point(hx, groundY)).WorkingArea;
         int lo = Math.Max(scr.Left, boxL), hi = Math.Min(scr.Right, boxR);
         if (hi - lo < 420) { lo = scr.Left; hi = scr.Right; }
@@ -4068,10 +4086,35 @@ public class PetForm : Form
         return true;
     }
 
+    // Номер карточки на странице под точкой; закрытые слоты не выбираются.
     int HitCard(Point p)
     {
-        for (int i = 0; i < cardRects.Length; i++) if (cardRects[i].Contains(p)) return i;
+        for (int i = 0; i < cardRects.Length; i++)
+            if (cardRects[i].Contains(p)) { var h = PageHero(i); return h != null && !h.Locked ? i : -1; }
         return -1;
+    }
+
+    Hero PageHero(int i)
+    {
+        int k = menuPage * PER_PAGE + i;
+        return k >= 0 && k < menuHeroes.Count ? menuHeroes[k] : null;
+    }
+
+    void FlipPage(int d)
+    {
+        int pages = Math.Max(1, (menuHeroes.Count + PER_PAGE - 1) / PER_PAGE);
+        menuPage = ((menuPage + d) % pages + pages) % pages;
+        LayoutMenu();
+        pageAt = DateTime.Now;
+        menuTouch = pageAt;
+    }
+
+    // Обновление для кнопки в шапке меню: 0 — нет, 1 — вышло (кнопка), 2 — ставится, 3 — готово, нужен перезапуск.
+    int UpdState()
+    {
+        if (updating) return 2;
+        if (updatedOk || downloaded) return 3;
+        return handledVer != "" && Newer(handledVer, localVer) ? 1 : 0;
     }
 
     // Страница настроек открывается той же анимацией, что и меню.
@@ -4087,7 +4130,7 @@ public class PetForm : Form
 
     bool OverControl(Point p)
     {
-        if (!menuSettings) return gearRect.Contains(p);
+        if (!menuSettings) return gearRect.Contains(p) || prevRect.Contains(p) || nextRect.Contains(p) || (updRect.Contains(p) && UpdState() == 1);
         foreach (var hit in setHits) if (hit.Key.Contains(p)) return true;
         return false;
     }
@@ -4106,10 +4149,13 @@ public class PetForm : Form
                 return;
             }
             if (e.Button == MouseButtons.Left && gearRect.Contains(e.Location)) { ShowSettings(true); return; }
+            if (e.Button == MouseButtons.Left && prevRect.Contains(e.Location)) { FlipPage(-1); return; }
+            if (e.Button == MouseButtons.Left && nextRect.Contains(e.Location)) { FlipPage(1); return; }
+            if (e.Button == MouseButtons.Left && updRect.Contains(e.Location)) { if (UpdState() == 1) StartUpdate(); return; }
             int i = HitCard(e.Location);
             if (e.Button == MouseButtons.Left && i >= 0)
             {
-                if ((DateTime.Now - menuAt).TotalMilliseconds > 200) Pick(menuHeroes[i]);
+                if ((DateTime.Now - menuAt).TotalMilliseconds > 200) Pick(PageHero(i));
             }
             // ПКМ или клик мимо панели — закрыть; клик по самой панели между карточками ничего не делает.
             else if (e.Button != MouseButtons.Left || !panel.Contains(e.Location)) CloseMenu();
@@ -4247,8 +4293,13 @@ public class PetForm : Form
 
         DrawMenuHead(x0, y0, w, life);
         if (menuSettings) DrawSettings(x0, y0, w, life);
-        for (int i = 0; i < menuHeroes.Count && i < cardRects.Length; i++)
-            DrawHeroCard(menuHeroes[i], cardRects[i], hoverK[i], life - 150 - i * 70, now, IsActive(menuHeroes[i]), i);
+        // После листания карточки новой страницы проявляются по очереди, как при открытии.
+        double cardLife = Math.Min(life, (DateTime.Now - pageAt).TotalMilliseconds + 150);
+        for (int i = 0; i < cardRects.Length; i++)
+        {
+            var one = PageHero(i);
+            if (one != null) DrawHeroCard(one, cardRects[i], hoverK[i], cardLife - 150 - i * 70, now, !one.Locked && IsActive(one), menuPage * PER_PAGE + i);
+        }
         if (life > 220) DrawMenuFoot(x0, y0 + h - FOOT, w, life);
     }
 
@@ -4267,9 +4318,12 @@ public class PetForm : Form
         }
         using (var b = new SolidBrush(YELLOW)) g.DrawString(title, fMenuHead, b, tx, hy, tight);
 
-        if (life > 120)
+        updRect = RectangleF.Empty;
+        int us = menuSettings ? 0 : UpdState();
+        if (life > 120 && us > 0) DrawUpdateButton(x0 + w - PAD, hy + 1, us);
+        else if (life > 120)
         {
-            string sub = menuSettings ? Tr("СОХРАНЯЕТСЯ САМО", "SAVED AUTOMATICALLY") + (localVer != "" ? "  //  V" + localVer : "") :Tr("КАНАЛ ЗАЩИЩЁН  //  ", "SECURE CHANNEL  //  ") + menuHeroes.Count.ToString("00");
+            string sub = menuSettings ? Tr("СОХРАНЯЕТСЯ САМО", "SAVED AUTOMATICALLY") + (localVer != "" ? "  //  V" + localVer : "") :Tr("КАНАЛ ЗАЩИЩЁН  //  ", "SECURE CHANNEL  //  ") + menuReal.ToString("00");
             float sw = g.MeasureString(sub, fMenuSub, PointF.Empty, tight).Width;
             using (var b = new SolidBrush(CYAN)) g.DrawString(sub, fMenuSub, b, x0 + w - PAD - sw, hy + 8, tight);
         }
@@ -4298,6 +4352,9 @@ public class PetForm : Form
         fx = DrawHint(fx, fy, Tr("[ЛКМ]", "[LMB]"), YELLOW, menuSettings ? Tr("ИЗМЕНИТЬ", "CHANGE") : Tr("ВЫБРАТЬ", "SELECT"));
         fx = DrawHint(fx + 22, fy, Tr("[ПКМ]", "[RMB]"), RED, menuSettings ? Tr("НАЗАД", "BACK") : Tr("ЗАКРЫТЬ", "CLOSE"));
         if (!menuSettings) DrawGearButton(fx + 22, y0 + 9);
+        prevRect = nextRect = RectangleF.Empty;
+        // Листалка страниц — слева от отсчёта (в узкой панели — у правого края).
+        if (!menuSettings && menuHeroes.Count > PER_PAGE) DrawPager(w < 460 ? x0 + w - PAD : x0 + w - PAD - 130, y0 + 9);
         // В узкой панели места под отсчёт нет.
         if (w < 460) return;
         double rest = Math.Max(0, 1 - (DateTime.Now - menuTouch).TotalSeconds / MENU_LIFE);
@@ -4320,6 +4377,50 @@ public class PetForm : Form
         CutBox(r, Color.FromArgb(255, hot ? 46 : 22, hot ? 16 : 18, hot ? 22 : 24), hot ? YELLOW : Color.FromArgb(170, RED));
         Gear(r.X + 15, r.Y + 13, 7, 0, hot ? YELLOW : CYAN, 1);
         using (var b = new SolidBrush(hot ? YELLOW : Color.FromArgb(226, 232, 240))) g.DrawString(label, fKey, b, r.X + 28, r.Y + 7, tight);
+    }
+
+    // «◀ СТР 1/3 ▶»: правый край — right, стрелки — кнопки в стиле панели.
+    void DrawPager(float right, float y0)
+    {
+        int pages = (menuHeroes.Count + PER_PAGE - 1) / PER_PAGE;
+        string label = Tr("СТР  ", "PAGE  ") + (menuPage + 1) + " / " + pages;
+        float tw = g.MeasureString(label, fKey, PointF.Empty, tight).Width;
+        nextRect = new RectangleF(right - 30, y0, 30, 26);
+        prevRect = new RectangleF(nextRect.X - 16 - tw - 30, y0, 30, 26);
+        using (var b = new SolidBrush(Color.FromArgb(226, 232, 240))) g.DrawString(label, fKey, b, prevRect.Right + 8, y0 + 7, tight);
+        foreach (var r in new[] { prevRect, nextRect })
+        {
+            bool hot = r.Contains(mouse), left = r == prevRect;
+            CutBox(r, Color.FromArgb(255, hot ? 46 : 22, hot ? 16 : 18, hot ? 22 : 24), hot ? YELLOW : Color.FromArgb(170, RED));
+            float cx = r.X + r.Width / 2, cy = r.Y + 13, s = left ? 1 : -1;
+            using (var b = new SolidBrush(hot ? YELLOW : CYAN))
+                g.FillPolygon(b, new[] { new PointF(cx - 4 * s, cy), new PointF(cx + 3 * s, cy - 6), new PointF(cx + 3 * s, cy + 6) });
+        }
+    }
+
+    // Кнопка обновления в шапке меню (правый край — right): вышло — пульсирует жёлтым, ставится, готово.
+    void DrawUpdateButton(float right, float y0, int state)
+    {
+        string label = state == 1 ? Tr("ВЫШЛО ОБНОВЛЕНИЕ V" + handledVer + "  //  ОБНОВИТЬ", "UPDATE V" + handledVer + " IS OUT  //  INSTALL")
+            : state == 2 ? Tr("ОБНОВЛЯЮСЬ…", "UPDATING…")
+            : Tr("ОБНОВЛЕНО  //  ПЕРЕЗАПУСТИ CLAUDE", "UPDATED  //  RESTART CLAUDE");
+        float tw = g.MeasureString(label, fKey, PointF.Empty, tight).Width;
+        var r = new RectangleF(right - tw - 34, y0, tw + 34, 26);
+        updRect = r;
+        bool hot = state == 1 && r.Contains(mouse);
+        double pulse = 0.5 + 0.5 * Math.Sin(Environment.TickCount / 1000.0 * 5);
+        Color edge = state == 1 ? YELLOW : state == 2 ? Color.FromArgb(170, RED) : CYAN;
+        if (state == 1)
+            for (int i = 3; i >= 1; i--)
+                using (var pen = new Pen(Color.FromArgb((int)(18 + 30 * pulse), YELLOW), i * 3f)) g.DrawRectangle(pen, r.X, r.Y, r.Width, r.Height);
+        CutBox(r, state == 1 ? (hot ? YELLOW : Mix(Color.FromArgb(255, 60, 52, 8), Color.FromArgb(255, 120, 108, 10), pulse)) : Color.FromArgb(255, 22, 18, 24), edge);
+        // Значок: стрелка вниз (скачать), у «готово» — галочка.
+        float ix = r.X + 14, iy = r.Y + 13;
+        Color ic = hot ? INK : edge;
+        using (var pen = new Pen(ic, 2))
+            if (state == 3) g.DrawLines(pen, new[] { new PointF(ix - 5, iy), new PointF(ix - 1, iy + 4), new PointF(ix + 6, iy - 4) });
+            else { g.DrawLine(pen, ix, iy - 6, ix, iy + 3); g.DrawLines(pen, new[] { new PointF(ix - 4, iy - 1), new PointF(ix, iy + 4), new PointF(ix + 4, iy - 1) }); }
+        using (var b = new SolidBrush(hot ? INK : state == 1 ? Color.White : Color.FromArgb(226, 232, 240))) g.DrawString(label, fKey, b, r.X + 26, r.Y + 7, tight);
     }
 
     // Прямоугольник со срезанным углом — кнопка в стиле панели.
@@ -4462,7 +4563,7 @@ public class PetForm : Form
         // Бюст готовит фоновый поток; пока он не готов — пустая сетка, а без кадров — «НЕТ СИГНАЛА».
         var bust = h.Set != null ? h.Set.Bust : null;
         if (bust != null) g.DrawImage(bust, pr.X, pr.Y, pr.Width, pr.Height);
-        else if (h.Set == null) NoSignal(pr, now);
+        else if (h.Set == null) NoSignal(pr, now, h.Locked);
         using (var b = new SolidBrush(Color.FromArgb(38, 0, 0, 0)))
             for (float sy0 = pr.Y + 1; sy0 < pr.Bottom; sy0 += 3) g.FillRectangle(b, pr.X, sy0, pr.Width, 1);
         using (var lg = new LinearGradientBrush(new PointF(0, pr.Bottom - 37), new PointF(0, pr.Bottom + 1), Color.FromArgb(0, 18, 11, 15), Color.FromArgb(215, 18, 11, 15)))
@@ -4521,7 +4622,7 @@ public class PetForm : Form
         float rowH = 17, sy0r = y0 + hgt - 18 - rows * rowH;
         if (rows == 0)
         {
-            using (var b = new SolidBrush(Color.FromArgb(150, RED))) g.DrawString(Tr("ДОСЬЕ ЗАСЕКРЕЧЕНО", "FILE CLASSIFIED"), fStat, b, x0 + 10, ty + 2, tight);
+            using (var b = new SolidBrush(Color.FromArgb(150, RED))) g.DrawString(Tr("ДОСЬЕ ЗАСЕКРЕЧЕНО", "FILE CLASSIFIED"), fStat, b, x0 + 10, y0 + hgt - 34, tight);
             return;
         }
         float barX = x0 + 10 + 78, barW = w - 20 - 78, segGap = 2.5f, segW = (barW - 9 * segGap) / 10;
@@ -4546,7 +4647,7 @@ public class PetForm : Form
     }
 
     // Нет кадров героя: тёмный силуэт в помехах и мигающее «НЕТ СИГНАЛА».
-    void NoSignal(RectangleF r, double now)
+    void NoSignal(RectangleF r, double now, bool locked = false)
     {
         var st = g.Save();
         g.SetClip(r, CombineMode.Intersect);
@@ -4566,12 +4667,12 @@ public class PetForm : Form
         using (var b = new SolidBrush(Color.FromArgb(26, 255, 255, 255)))
             g.FillRectangle(b, r.X, r.Y + (float)((now * 70) % r.Height), r.Width, 3);
         g.Restore(st);
-        string NO = Tr("НЕТ СИГНАЛА", "NO SIGNAL");
+        string NO = locked ? Tr("СЛОТ ЗАКРЫТ", "LOCKED") : Tr("НЕТ СИГНАЛА", "NO SIGNAL");
         var size = g.MeasureString(NO, fRole, PointF.Empty, tight);
         var plate = new RectangleF(cx - size.Width / 2 - 8, r.Y + r.Height / 2 - 11, size.Width + 16, 22);
         using (var b = new SolidBrush(Color.FromArgb(220, 10, 8, 10))) g.FillRectangle(b, plate);
         using (var pen = new Pen(Color.FromArgb(160, RED), 1)) g.DrawRectangle(pen, plate.X, plate.Y, plate.Width, plate.Height);
-        if (((int)(now / 0.55)) % 2 == 0)
+        if (locked || ((int)(now / 0.55)) % 2 == 0)
             using (var b = new SolidBrush(RED)) g.DrawString(NO, fRole, b, plate.X + 8, plate.Y + 5, tight);
     }
 
