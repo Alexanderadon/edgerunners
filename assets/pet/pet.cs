@@ -300,8 +300,8 @@ public class PetForm : Form
             updatedOk = done > 0;
             nextNotice = DateTime.MaxValue;
             if (done > 0)
-                Notify(Tr("Обновился до v" + handledVer + ", перезапусти Claude Code. Кликни меня — открою GitHub для звезды",
-                          "Updated to v" + handledVer + " — restart Claude Code. Click me to open GitHub and leave a star"), OpenRepo);
+                Notify(Tr("Обновился до v" + handledVer + ", перезапусти Claude Code. Кликни меня, открою GitHub для звезды",
+                          "Updated to v" + handledVer + ", restart Claude Code. Click me to open GitHub and leave a star"), OpenRepo);
             else
                 Notify(Tr("Не вышло обновиться. Набери /plugin → Marketplaces → edgerunners → Update",
                           "Update failed. Run /plugin → Marketplaces → edgerunners → Update"), null);
@@ -332,12 +332,12 @@ public class PetForm : Form
             if (downloaded)
             {
                 nextNotice = DateTime.MaxValue;
-                Notify(Tr("Новая версия v" + handledVer + " уже скачана — перезапусти Claude Code", "Version v" + handledVer + " is downloaded — restart Claude Code"), null);
+                Notify(Tr("Новая версия v" + handledVer + " уже скачана, перезапусти Claude Code", "Version v" + handledVer + " is downloaded, restart Claude Code"), null);
             }
             else
             {
                 nextNotice = t.AddHours(3);
-                Notify(Tr("Вышла новая версия мода: v" + handledVer + ". Кликни меня — обновлю", "Mod update v" + handledVer + " is out. Click me and I'll install it"), StartUpdate);
+                Notify(Tr("Вышла новая версия мода: v" + handledVer + ". Кликни меня, обновлю", "Mod update v" + handledVer + " is out. Click me and I'll install it"), StartUpdate);
             }
         }
         // Звезда: один раз, через пару дней после первого запуска и не поверх обновления.
@@ -347,8 +347,8 @@ public class PetForm : Form
         {
             starAsked = true;
             SaveSettings();
-            Notify(Tr("Нравится, как мы работаем? Кликни меня — открою GitHub. Звезда моду очень поможет",
-                      "Enjoying our work together? Click me to open GitHub — a star really helps the mod"), OpenRepo);
+            Notify(Tr("Нравится, как мы работаем? Кликни меня, открою GitHub. Звезда моду очень поможет",
+                      "Enjoying our work together? Click me to open GitHub, a star really helps the mod"), OpenRepo);
         }
     }
 
@@ -429,7 +429,7 @@ public class PetForm : Form
         try { Process.Start(new ProcessStartInfo(REPO) { UseShellExecute = true }); }
         catch (Exception e) { Report("repo: " + e.Message); }
         if (!starAsked) { starAsked = true; SaveSettings(); }
-        Notify(Tr("Спасибо! Звёзды — топливо для новых героев", "Thanks! Stars fuel new heroes"), null);
+        Notify(Tr("Спасибо! Звёзды дают топливо для новых героев", "Thanks! Stars fuel new heroes"), null);
     }
 
     void CheckNow()
