@@ -187,6 +187,9 @@ public class PetForm : Form
             if (Val(o, "volume") != null) volume = Math.Max(0, Math.Min(10, (int)Num(Val(o, "volume"))));
             if (Val(o, "lines") != null) linesMode = Math.Max(0, Math.Min(2, (int)Num(Val(o, "lines"))));
             if (Val(o, "size") != null && Array.IndexOf(SIZES, (int)Num(Val(o, "size"))) >= 0) sizePct = (int)Num(Val(o, "size"));
+            autoUpdate = Str(o, "updates") == "auto";
+            starAsked = Flag(o, "starAsked", false);
+            firstRun = Str(o, "firstRun") ?? "";
         }
         catch (Exception) { }
     }
@@ -196,7 +199,8 @@ public class PetForm : Form
     void SaveSettings()
     {
         string text = "{\"lang\":\"" + lang + "\",\"call\":" + (callOn ? "true" : "false") + ",\"volume\":" + volume + ",\"lines\":" + linesMode
-            + ",\"effects\":" + (fxOn ? "true" : "false") + ",\"wander\":" + (wanderOn ? "true" : "false") + ",\"size\":" + sizePct + "}";
+            + ",\"effects\":" + (fxOn ? "true" : "false") + ",\"wander\":" + (wanderOn ? "true" : "false") + ",\"size\":" + sizePct
+            + ",\"updates\":\"" + (autoUpdate ? "auto" : "ask") + "\",\"starAsked\":" + (starAsked ? "true" : "false") + ",\"firstRun\":\"" + firstRun + "\"}";
         try { File.WriteAllText(settingsPath, text, new UTF8Encoding(false)); }
         catch (Exception e) { Report("settings: " + e.Message); }
     }
@@ -213,6 +217,227 @@ public class PetForm : Form
             testSound = Process.Start(new ProcessStartInfo("powershell", "-NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + script + "\" -Test") { UseShellExecute = false, CreateNoWindow = true });
         }
         catch (Exception e) { Report("test: " + e.Message); }
+    }
+
+    // ---- обновления и звезда на GitHub ----
+    // Раз в 6 часов сверяем version из .claude-plugin/plugin.json с репозиторием. Новая версия: «АВТО» — питомец сам
+    // запускает claude plugin update, «СПРАШИВАТЬ» — говорит об этом, клик по герою обновляет. Через пару дней после
+    // первого запуска один раз просит звезду на GitHub (клик открывает страницу). Пока висит такая карточка, реплики
+    // мода ждут, а клик по герою — ответ на неё.
+    const string REPO = "https://github.com/Alexanderadon/edgerunners";
+    const string REMOTE_MANIFEST = "https://raw.githubusercontent.com/Alexanderadon/edgerunners/main/.claude-plugin/plugin.json";
+    bool autoUpdate, starAsked, updating, downloaded;
+    string firstRun = "", localVer = "", handledVer = "";
+    // Версия на GitHub (пишет фоновый поток; "" — не достучались), проверка по кнопке, итог обновления (1 / -1).
+    volatile string remoteVer;
+    volatile bool checkNow, checkReport;
+    volatile int updateDone;
+    DateTime petStart = DateTime.Now, nextNotice = DateTime.MaxValue, noticeUntil = DateTime.MinValue;
+    Action noticeAct;
+
+    string ReadLocalVersion()
+    {
+        try
+        {
+            var o = Json.Parse(File.ReadAllText(Path.Combine(root, @".claude-plugin\plugin.json"), Encoding.UTF8).TrimStart('﻿')) as Dictionary<string, object>;
+            return (o == null ? null : Str(o, "version")) ?? "";
+        }
+        catch (Exception) { return ""; }
+    }
+
+    void UpdateLoop()
+    {
+        Thread.Sleep(20000);
+        while (!closing)
+        {
+            try
+            {
+                System.Net.ServicePointManager.SecurityProtocol |= System.Net.SecurityProtocolType.Tls12;
+                using (var wc = new System.Net.WebClient())
+                {
+                    wc.Encoding = Encoding.UTF8;
+                    wc.Headers[System.Net.HttpRequestHeader.UserAgent] = "edgerunners-pet";
+                    var o = Json.Parse(wc.DownloadString(REMOTE_MANIFEST + "?t=" + DateTime.UtcNow.Ticks).TrimStart('﻿')) as Dictionary<string, object>;
+                    remoteVer = (o == null ? null : Str(o, "version")) ?? "";
+                }
+            }
+            catch (Exception e) { remoteVer = ""; Report("update check: " + e.Message); }
+            for (int i = 0; i < 6 * 360 && !closing && !checkNow; i++) Thread.Sleep(10000);
+            checkNow = false;
+        }
+    }
+
+    static bool Newer(string a, string b)
+    {
+        Version x, y;
+        return Version.TryParse(a ?? "", out x) && Version.TryParse(b ?? "", out y) && x > y;
+    }
+
+    // Claude Code уже скачал эту версию сам (его автообновление): рядом с нашей папкой версии есть такая же или новее.
+    bool AlreadyDownloaded(string v)
+    {
+        try
+        {
+            string me = root.TrimEnd('\\', '/');
+            Version mine, x;
+            if (!Version.TryParse(Path.GetFileName(me), out mine)) return false;
+            foreach (var d in Directory.GetDirectories(Path.GetDirectoryName(me)))
+                if (Version.TryParse(Path.GetFileName(d), out x) && !Newer(v, x.ToString())) return true;
+        }
+        catch (Exception) { }
+        return false;
+    }
+
+    // Раз в четверть секунды (UI-поток): итог обновления, свежая версия с GitHub, карточки.
+    void UpdateTick()
+    {
+        var t = DateTime.Now;
+        int done = updateDone;
+        if (done != 0)
+        {
+            updateDone = 0;
+            updating = false;
+            nextNotice = DateTime.MaxValue;
+            if (done > 0)
+                Notify(Tr("Обновился до v" + handledVer + ", перезапусти Claude Code. Кликни меня — открою GitHub для звезды",
+                          "Updated to v" + handledVer + " — restart Claude Code. Click me to open GitHub and leave a star"), OpenRepo);
+            else
+                Notify(Tr("Не вышло обновиться. Набери /plugin → Marketplaces → edgerunners → Update",
+                          "Update failed. Run /plugin → Marketplaces → edgerunners → Update"), null);
+            return;
+        }
+        string rv = remoteVer;
+        if (rv != null && !updating)
+        {
+            if (rv == "")
+            {
+                if (checkReport) { checkReport = false; Notify(Tr("GitHub не отвечает, попробуй позже", "GitHub isn't answering, try later"), null); }
+            }
+            else if (Newer(rv, localVer))
+            {
+                if (rv != handledVer)
+                {
+                    handledVer = rv;
+                    checkReport = false;
+                    downloaded = AlreadyDownloaded(rv);
+                    if (!downloaded && autoUpdate) StartUpdate();
+                    else nextNotice = checkNow || t > petStart.AddSeconds(40) ? t : petStart.AddSeconds(40);
+                }
+            }
+            else if (checkReport) { checkReport = false; Notify(Tr("У тебя последняя версия: v" + localVer, "You have the latest version: v" + localVer), null); }
+        }
+        if (t >= nextNotice && !menuOpen && t >= noticeUntil)
+        {
+            if (downloaded)
+            {
+                nextNotice = DateTime.MaxValue;
+                Notify(Tr("Новая версия v" + handledVer + " уже скачана — перезапусти Claude Code", "Version v" + handledVer + " is downloaded — restart Claude Code"), null);
+            }
+            else
+            {
+                nextNotice = t.AddHours(3);
+                Notify(Tr("Вышла новая версия мода: v" + handledVer + ". Кликни меня — обновлю", "Mod update v" + handledVer + " is out. Click me and I'll install it"), StartUpdate);
+            }
+        }
+        // Звезда: один раз, через пару дней после первого запуска и не поверх обновления.
+        DateTime first;
+        if (!starAsked && !updating && nextNotice == DateTime.MaxValue && !menuOpen && t >= noticeUntil && t > petStart.AddSeconds(90)
+            && DateTime.TryParseExact(firstRun, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out first) && (t - first).TotalDays >= 2)
+        {
+            starAsked = true;
+            SaveSettings();
+            Notify(Tr("Нравится, как мы работаем? Кликни меня — открою GitHub. Звезда моду очень поможет",
+                      "Enjoying our work together? Click me to open GitHub — a star really helps the mod"), OpenRepo);
+        }
+    }
+
+    // Карточка, которую не перебьют реплики мода; act — что сделать по клику, пока она видна.
+    void Notify(string text, Action act)
+    {
+        var t = DateTime.Now;
+        if (t >= sayUntil) sayAt = t;
+        line = text;
+        lineAt = t;
+        pendingLine = null;
+        sayUntil = noticeUntil = t.AddSeconds(act != null ? 20 : 12);
+        noticeAct = act;
+    }
+
+    // Клик по герою, пока видна карточка: её действие. true — клик съеден.
+    bool NoticeClick()
+    {
+        if (menuOpen || DateTime.Now >= noticeUntil) return false;
+        var act = noticeAct;
+        noticeAct = null;
+        noticeUntil = DateTime.Now;
+        if (act == null) return false;
+        act();
+        return true;
+    }
+
+    void StartUpdate()
+    {
+        if (updating) return;
+        updating = true;
+        nextNotice = DateTime.MaxValue;
+        if (!autoUpdate || noticeAct != null || DateTime.Now < noticeUntil) Notify(Tr("Обновляюсь… это до минуты", "Updating… up to a minute"), null);
+        new Thread(() =>
+        {
+            string exe = FindClaudeCli();
+            bool ok = RunClaude(exe, "plugin marketplace update edgerunners") == 0 && RunClaude(exe, "plugin update edgerunners@edgerunners") == 0;
+            updateDone = ok ? 1 : -1;
+        }) { IsBackground = true, Name = "pet-upgrade" }.Start();
+    }
+
+    // CLI Claude Code: тот, что запущен (в приложении он лежит в папке claude-code), иначе ~/.local/bin, иначе из PATH.
+    static string FindClaudeCli()
+    {
+        try
+        {
+            foreach (var p in Process.GetProcessesByName("claude"))
+                try
+                {
+                    string f = p.MainModule.FileName;
+                    if (f.IndexOf("claude-code", StringComparison.OrdinalIgnoreCase) >= 0 || f.IndexOf(@"\.local\bin\", StringComparison.OrdinalIgnoreCase) >= 0) return f;
+                }
+                catch (Exception) { }
+        }
+        catch (Exception) { }
+        string local = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".local\bin\claude.exe");
+        return File.Exists(local) ? local : null;
+    }
+
+    static int RunClaude(string exe, string args)
+    {
+        try
+        {
+            var psi = exe != null ? new ProcessStartInfo(exe, args) : new ProcessStartInfo("cmd.exe", "/c claude " + args);
+            psi.UseShellExecute = false;
+            psi.CreateNoWindow = true;
+            using (var p = Process.Start(psi))
+            {
+                if (!p.WaitForExit(180000)) { try { p.Kill(); } catch (Exception) { } return -1; }
+                return p.ExitCode;
+            }
+        }
+        catch (Exception e) { Report("update: " + e.Message); return -1; }
+    }
+
+    void OpenRepo()
+    {
+        try { Process.Start(new ProcessStartInfo(REPO) { UseShellExecute = true }); }
+        catch (Exception e) { Report("repo: " + e.Message); }
+        if (!starAsked) { starAsked = true; SaveSettings(); }
+        Notify(Tr("Спасибо! Звёзды — топливо для новых героев", "Thanks! Stars fuel new heroes"), null);
+    }
+
+    void CheckNow()
+    {
+        remoteVer = null;
+        handledVer = "";
+        checkReport = true;
+        checkNow = true;
+        Notify(Tr("Проверяю обновления…", "Checking for updates…"), null);
     }
 
     // ---- запуск: папка мода; состояние мода и окно Claude читает фоновый поток ----
@@ -233,6 +458,9 @@ public class PetForm : Form
         ChoicePath = Path.Combine(root, @"assets\pet\choice.json");
         settingsPath = Path.Combine(root, @"assets\pet\settings.json");
         LoadSettings();
+        if (string.IsNullOrEmpty(firstRun)) { firstRun = DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture); SaveSettings(); }
+        localVer = ReadLocalVersion();
+        new Thread(UpdateLoop) { IsBackground = true, Priority = ThreadPriority.BelowNormal, Name = "pet-update" }.Start();
         feed = new Thread(FeedLoop) { IsBackground = true, Name = "pet-feed" };
         feed.Start();
         new Thread(PreJit) { IsBackground = true, Priority = ThreadPriority.Lowest, Name = "pet-jit" }.Start();
@@ -352,6 +580,8 @@ public class PetForm : Form
     {
         if (string.IsNullOrEmpty(text)) return;
         var t = DateTime.Now;
+        // Карточка об обновлении или звезде держится; реплика покажется после неё.
+        if (t < noticeUntil && text != line) { pendingLine = text; return; }
         bool visible = t < sayUntil;
         if (!urgent && (linesMode == 2 || (linesMode == 1 && (visible || (t - sayAt).TotalSeconds < RARE_GAP_S)))) return;
         if (visible && text == line) { pendingLine = null; sayUntil = t.AddSeconds(8); return; }
@@ -414,6 +644,7 @@ public class PetForm : Form
     {
         if (menuOpen) return true;
         if (at.HasValue) AddTap(at.Value);
+        if (NoticeClick()) return true;
         if (pokes.Count == 0) return false;
         var t = DateTime.Now;
         clickTimes.Enqueue(t);
@@ -1473,6 +1704,7 @@ public class PetForm : Form
     void Follow()
     {
         DrainInbox();
+        UpdateTick();
         if (LastError != reportedError) { reportedError = LastError; Report("render: " + LastError); }
         string fe = feedError;
         if (fe != reportedFeed) { reportedFeed = fe; Report("feed: " + fe); }
@@ -3696,7 +3928,7 @@ public class PetForm : Form
     // ---- меню выбора напарника (ПКМ) ----
     const int CARD_W = 196, CARD_H = 322, GAP = 14, PAD = 22, HEAD = 62, FOOT = 46, PORT_H = 150;
     const double MENU_LIFE = 20, OPEN_MS = 250, CLOSE_MS = 150;
-    const int SET_W = 470, SET_ROW = 36, SET_ROWS = 7;
+    const int SET_W = 470, SET_ROW = 36, SET_ROWS = 9;
     const string GLYPHS = "#%&*+<>/\\|=01ЖЯЩЮ";
     bool menuOpen, menuSettings;
     DateTime menuAt, menuTouch, menuClosedAt = DateTime.MinValue;
@@ -4037,7 +4269,7 @@ public class PetForm : Form
 
         if (life > 120)
         {
-            string sub = menuSettings ? Tr("СОХРАНЯЕТСЯ САМО", "SAVED AUTOMATICALLY") : Tr("КАНАЛ ЗАЩИЩЁН  //  ", "SECURE CHANNEL  //  ") + menuHeroes.Count.ToString("00");
+            string sub = menuSettings ? Tr("СОХРАНЯЕТСЯ САМО", "SAVED AUTOMATICALLY") + (localVer != "" ? "  //  V" + localVer : "") :Tr("КАНАЛ ЗАЩИЩЁН  //  ", "SECURE CHANNEL  //  ") + menuHeroes.Count.ToString("00");
             float sw = g.MeasureString(sub, fMenuSub, PointF.Empty, tight).Width;
             using (var b = new SolidBrush(CYAN)) g.DrawString(sub, fMenuSub, b, x0 + w - PAD - sw, hy + 8, tight);
         }
@@ -4125,6 +4357,12 @@ public class PetForm : Form
         y += SET_ROW;
         SetRow(lx, y, right, Tr("ПРОГУЛКИ", "WALKS"), false);
         SetChoices(cx, y, right, new[] { Tr("ВКЛ", "ON"), Tr("ВЫКЛ", "OFF") }, wanderOn ? 0 : 1, false, i => { wanderOn = i == 0; });
+        y += SET_ROW;
+        SetRow(lx, y, right, Tr("ОБНОВЛЕНИЯ", "UPDATES"), false);
+        SetChoices(cx, y, right, new[] { Tr("СПРАШИВАТЬ", "ASK"), Tr("АВТО", "AUTO") }, autoUpdate ? 1 : 0, false, i => { autoUpdate = i == 1; });
+        y += SET_ROW;
+        SetRow(lx, y, right, "GITHUB", false);
+        SetChoices(cx, y, right, new[] { Tr("ЗВЕЗДА", "STAR"), Tr("ПРОВЕРИТЬ", "CHECK") }, -1, false, i => { if (i == 0) OpenRepo(); else CheckNow(); });
     }
 
     void SetRow(float lx, float y, float right, string label, bool dim)
