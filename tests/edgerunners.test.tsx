@@ -562,7 +562,9 @@ test('после долгого хода Кадр звонит «входящи�
   await clock.advance(2000)
 
   // Короткий ход не зовёт, долгий — зовёт: показывает на тебя и машет.
+  await $.prompt.submit({ text: 'глянь', ...TYPED })
   await $.turn.complete({ answer: 'ok', durationMs: 3_000, isAborted: false, turnId: 't1', reason: 'answer' })
+  await $.prompt.submit({ text: 'почини ходьбу', ...TYPED })
   await $.turn.complete({ answer: '## Итог\n**Починил** ходьбу и добавил звонок.', durationMs: 20_000, isAborted: false, turnId: 't2', reason: 'answer' })
   const ringing = framesOf(lastOf(states))
   expect(ringing.indexOf('point_01') < ringing.indexOf('wave_01')).toBe(true)
@@ -630,6 +632,48 @@ test('радость за просьбу — ровно одна: фоновые
   expect([calls(), cheers()]).toEqual([1, 1])
   expect(clipOf(lastOf(states))).toBe('idle')
   expect(lastOf(states).busy).toBe(false)
+})
+
+test('события приложения, сообщения сессий и агентов новой работы не начинают и не звонят', async ($, on) => {
+  const clock = engine(on)
+  const runs: string[] = []
+  on('process.run', (_, e) => {
+    runs.push(e.argv.join(' '))
+
+    return RAN
+  })
+  const calls = () => runs.filter(line => line.includes('call.ps1')).length
+  await $.session.start(START)
+  await clock.advance(2000)
+
+  // Просьба человека кончилась: один звонок.
+  await $.prompt.submit({ text: 'собери сборку', ...TYPED })
+  await $.turn.complete({ answer: 'Сборка готова.', durationMs: 40_000, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10_000)
+  expect(calls()).toBe(1)
+
+  // Дальше приходят только машинные ходы, каждый долгий: звонков больше нет.
+  const machine = [
+    { text: '<side-sessions-event>None of the sessions you started is working now</side-sessions-event>', origin: { kind: 'sdk' } },
+    { text: '<ci-monitor-event>checks passed</ci-monitor-event>', origin: { kind: 'composer' } },
+    { text: 'Another Claude session sent a message', origin: { kind: 'peer' } },
+    { text: 'отчёт сессии', origin: { kind: 'unclassified' } },
+    { text: '/loop tick', origin: { kind: 'scheduled-trigger' } },
+    { text: 'сообщение мода', origin: { kind: 'plugin', name: 'other' } },
+  ]
+  let n = 2
+  for (const m of machine) {
+    await $.prompt.submit({ ...m, wait: false } as never)
+    await $.turn.complete({ answer: 'Принял, сессия ещё работает.', durationMs: 30_000, isAborted: false, turnId: `t${n++}`, reason: 'answer' })
+    await clock.advance(10_000)
+  }
+  expect(calls()).toBe(1)
+
+  // Мод, пишущий от имени человека, это просьба человека: звонок есть.
+  await $.prompt.submit({ text: 'сделай отчёт', wait: false, origin: { kind: 'plugin', name: 'other', asUser: true } } as never)
+  await $.turn.complete({ answer: 'Отчёт готов.', durationMs: 30_000, isAborted: false, turnId: `t${n++}`, reason: 'answer' })
+  await clock.advance(100)
+  expect(calls()).toBe(2)
 })
 
 test('Кадр живёт десктоп-питомцем: мод запускает его и пишет, что играть, что сказать и кто ещё есть', async ($, on) => {

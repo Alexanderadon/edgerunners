@@ -683,9 +683,22 @@ const openTurn = async ($: EngineInterface, kind: Exclude<TurnKind, 'none'>) => 
 }
 
 // prompt.submit: просьба человека или отчёт фоновой задачи. Уведомление внутрь идущего хода — не новый ход.
-// Не человек: отчёт фоновой задачи, расписание, сообщение другой сессии. О таком герой не цитирует текст.
-const MACHINE = new Set(['task-notification', 'scheduled-trigger', 'peer', 'peer-send-message'])
-const isMachine = (e: PromptSubmitInput) => MACHINE.has(e.origin?.kind ?? '')
+// Не человек: отчёт фоновой задачи, расписание, сообщение другой сессии или агента, событие приложения без метки
+// (отчёты сессий, проверки CI). Такой ход новую работу не начинает и звонка не даёт, только может закончить
+// уже начатую просьбу. О таком герой не цитирует текст.
+const MACHINE = new Set([
+  'task-notification', 'scheduled-trigger', 'peer', 'peer-send-message', 'projects-relay', 'coordinator',
+  'observer', 'observer-activity', 'unclassified',
+])
+const APP_EVENT = /<(side-sessions-event|ci-monitor-event|task-notification)>/
+const isMachine = (e: PromptSubmitInput) => {
+  const origin = e.origin
+  if (origin?.kind === 'plugin') {
+    return origin.asUser !== true
+  }
+
+  return MACHINE.has(origin?.kind ?? '') || APP_EVENT.test(e.text)
+}
 
 const startTurn = async ($: EngineInterface, e: PromptSubmitInput) => {
   const isNotice = e.origin?.kind === 'task-notification'
@@ -709,7 +722,7 @@ const startTurn = async ($: EngineInterface, e: PromptSubmitInput) => {
   announced = true
   deed = undefined
   tellDeed(isMachine(e) ? { kind: 'notice', target: '' } : promptDeed(e.text))
-  await openTurn($, isNotice ? 'notice' : 'user')
+  await openTurn($, isMachine(e) ? 'notice' : 'user')
 }
 
 // turn.start главного цикла без prompt.submit: ход скилла (сразу за слэш-командой) или продолжение.
@@ -773,7 +786,8 @@ const finishTurn = async ($: EngineInterface, e: TurnCompleteInput) => {
   }
   lastTurn = e.turnId
   const kind = turnKind
-  const isOwn = kind === 'user' || kind === 'none'
+  // Ход, начала которого мод не видел, свой, только если просьба человека ещё не закрыта.
+  const isOwn = kind === 'user' || (kind === 'none' && owed)
   turnKind = 'none'
   announced = false
   busy = false
